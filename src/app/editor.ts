@@ -129,6 +129,7 @@ export class Editor implements EditorContext {
 
     this.renderScene();
     this.fitView();
+    this.root.focus();
   }
 
   destroy(): void {
@@ -766,7 +767,9 @@ export class Editor implements EditorContext {
   }
 
   private bindKeyboard(): void {
-    this.root.addEventListener('keydown', (e: KeyboardEvent) => {
+    // Window-level so shortcuts work regardless of what is focused
+    // (right after startup, after toolbar clicks, etc.).
+    const onKeydown = (e: KeyboardEvent) => {
       const inInput = (e.target as HTMLElement)?.matches?.('input, textarea, select');
       if (inInput) return;
       const ctrl = e.ctrlKey || e.metaKey;
@@ -831,7 +834,9 @@ export class Editor implements EditorContext {
           }
         });
       }
-    });
+    };
+    window.addEventListener('keydown', onKeydown);
+    this.unsubs.push(() => window.removeEventListener('keydown', onKeydown));
   }
 }
 
