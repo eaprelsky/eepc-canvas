@@ -1,5 +1,11 @@
 node_modules/
 dist/
 dist-embed/
+desktop/bin/
+desktop/dist/
+desktop/resources/
+desktop/.tmp/
+desktop/.client-cache/
+release/
 *.local
 .DS_Store

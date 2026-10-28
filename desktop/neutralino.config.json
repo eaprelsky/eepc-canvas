@@ -1,0 +1,34 @@
+{
+  "applicationId": "ru.eaprelsky.eepccanvas",
+  "version": "0.1.0",
+  "defaultMode": "window",
+  "port": 0,
+  "documentRoot": "/resources/",
+  "url": "/",
+  "enableServer": true,
+  "enableNativeAPI": false,
+  "tokenSecurity": "one-time",
+  "logging": {
+    "enabled": false,
+    "writeToLogFile": false
+  },
+  "modes": {
+    "window": {
+      "title": "eEPC Canvas — редактор eEPC-диаграмм",
+      "width": 1440,
+      "height": 900,
+      "minWidth": 960,
+      "minHeight": 640,
+      "center": true,
+      "exitProcessOnClose": true,
+      "enableInspector": false
+    }
+  },
+  "cli": {
+    "binaryName": "eepc-canvas",
+    "resourcesPath": "/resources/",
+    "clientLibrary": "/resources/neutralino.js",
+    "binaryVersion": "6.10.0",
+    "clientVersion": "6.10.0"
+  }
+}
