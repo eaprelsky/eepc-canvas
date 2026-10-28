@@ -1,0 +1,26 @@
+{
+  "name": "eepc-canvas",
+  "version": "0.1.0",
+  "description": "Lightweight editor for ARIS eEPC business-process diagrams. JSON files, grid layout, orthogonal routing, zero runtime dependencies.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Yegor Aprelsky",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/eaprelsky/eepc-canvas"
+  },
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && vite build",
+    "build:embed": "vite build --config vite.embed.config.ts",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.2.4"
+  }
+}

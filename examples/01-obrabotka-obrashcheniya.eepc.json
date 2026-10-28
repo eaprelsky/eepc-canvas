@@ -1,0 +1,41 @@
+{
+  "format": "eepc-diagram",
+  "version": 1,
+  "name": "Обработка обращения в техподдержку",
+  "nodes": [
+    { "id": "e1", "type": "event", "label": "Поступило обращение в техподдержку" },
+    { "id": "f1", "type": "function", "label": "Определить тему обращения" },
+    { "id": "r1", "type": "role", "label": "Специалист первой линии", "attachTo": "f1", "side": "right" },
+    { "id": "s1", "type": "system", "label": "Help Desk", "attachTo": "f1", "side": "right", "dir": "both" },
+    { "id": "d1", "type": "document", "label": "Тикет", "attachTo": "f1", "side": "left", "dir": "in" },
+    { "id": "g1", "type": "gateway", "label": "", "operator": "XOR" },
+    { "id": "e2", "type": "event", "label": "Обращение про выплаты" },
+    { "id": "f2", "type": "function", "label": "Проверить права на выплату" },
+    { "id": "r2", "type": "role", "label": "Финансовый специалист", "attachTo": "f2", "side": "right" },
+    { "id": "d2", "type": "document", "label": "Реестр выплат", "attachTo": "f2", "side": "left", "dir": "in" },
+    { "id": "e4", "type": "event", "label": "Возврат оформлен" },
+    { "id": "e3", "type": "event", "label": "Обращение про технику" },
+    { "id": "f3", "type": "function", "label": "Решить техническую проблему" },
+    { "id": "r3", "type": "role", "label": "Специалист второй линии", "attachTo": "f3", "side": "right" },
+    { "id": "s2", "type": "system", "label": "База знаний", "attachTo": "f3", "side": "left", "dir": "in" },
+    { "id": "e5", "type": "event", "label": "Проблема решена" },
+    { "id": "g2", "type": "gateway", "label": "", "operator": "XOR" },
+    { "id": "f4", "type": "function", "label": "Закрыть тикет и заполнить отчёт" },
+    { "id": "d3", "type": "document", "label": "Отчёт о времени", "attachTo": "f4", "side": "right", "dir": "out" },
+    { "id": "e6", "type": "event", "label": "Обращение закрыто" }
+  ],
+  "flows": [
+    { "id": "fl1", "from": "e1", "to": "f1" },
+    { "id": "fl2", "from": "f1", "to": "g1" },
+    { "id": "fl3", "from": "g1", "to": "e2" },
+    { "id": "fl4", "from": "e2", "to": "f2" },
+    { "id": "fl5", "from": "f2", "to": "e4" },
+    { "id": "fl6", "from": "g1", "to": "e3" },
+    { "id": "fl7", "from": "e3", "to": "f3" },
+    { "id": "fl8", "from": "f3", "to": "e5" },
+    { "id": "fl9", "from": "e4", "to": "g2" },
+    { "id": "fl10", "from": "e5", "to": "g2" },
+    { "id": "fl11", "from": "g2", "to": "f4" },
+    { "id": "fl12", "from": "f4", "to": "e6" }
+  ]
+}

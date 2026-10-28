@@ -1,0 +1,35 @@
+{
+  "format": "eepc-diagram",
+  "version": 1,
+  "name": "Обработка заказа",
+  "nodes": [
+    { "id": "e0", "type": "event", "label": "Сформирован заказ" },
+    { "id": "gA", "type": "gateway", "label": "", "operator": "AND" },
+    { "id": "fA1", "type": "function", "label": "Присвоить заказу номер" },
+    { "id": "sA", "type": "system", "label": "CRM", "attachTo": "fA1", "side": "right", "dir": "in" },
+    { "id": "eA1", "type": "event", "label": "Заказу присвоен номер" },
+    { "id": "fA2", "type": "function", "label": "Подобрать исполнителя" },
+    { "id": "rA", "type": "role", "label": "Менеджер заказов", "attachTo": "fA2", "side": "right" },
+    { "id": "eA2", "type": "event", "label": "Исполнитель подобран" },
+    { "id": "fA3", "type": "function", "label": "Выставить счёт на оплату" },
+    { "id": "dA", "type": "document", "label": "Счёт на оплату", "attachTo": "fA3", "side": "left", "dir": "out" },
+    { "id": "eA3", "type": "event", "label": "Счёт оплачен" },
+    { "id": "gB", "type": "gateway", "label": "", "operator": "AND" },
+    { "id": "fA4", "type": "function", "label": "Передать заказ исполнителю" },
+    { "id": "eA4", "type": "event", "label": "Заказ передан исполнителю" }
+  ],
+  "flows": [
+    { "id": "fl1", "from": "e0", "to": "gA" },
+    { "id": "fl2", "from": "gA", "to": "fA1" },
+    { "id": "fl3", "from": "fA1", "to": "eA1" },
+    { "id": "fl4", "from": "gA", "to": "fA2" },
+    { "id": "fl5", "from": "fA2", "to": "eA2" },
+    { "id": "fl6", "from": "gA", "to": "fA3" },
+    { "id": "fl7", "from": "fA3", "to": "eA3" },
+    { "id": "fl8", "from": "eA1", "to": "gB" },
+    { "id": "fl9", "from": "eA2", "to": "gB" },
+    { "id": "fl10", "from": "eA3", "to": "gB" },
+    { "id": "fl11", "from": "gB", "to": "fA4" },
+    { "id": "fl12", "from": "fA4", "to": "eA4" }
+  ]
+}
