@@ -4,6 +4,12 @@ import { svgEl } from './svg';
 
 const HEX_CORNER = 30;
 
+/** Baseline shift that optically centers a text line at a given middle
+ *  (cap-height correction, works for Cyrillic and Latin mixes). */
+const CAP_RATIO = 0.36;
+
+export const FONT_FAMILY = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+
 export function drawNode(view: NodeView): SVGGElement {
   const g = svgEl('g', {
     transform: `translate(${view.x},${view.y})`,
@@ -18,15 +24,15 @@ export function drawNode(view: NodeView): SVGGElement {
         points: `${d},0 ${view.w - d},0 ${view.w},${view.h / 2} ${view.w - d},${view.h} ${d},${view.h} 0,${view.h / 2}`,
         fill: c.fill, stroke: c.stroke, 'stroke-width': 1.5,
       }));
-      drawLabel(g, view, 0);
+      drawLabel(g, view, 0, 0);
       break;
     }
     case 'function': {
       g.appendChild(svgEl('rect', {
-        width: view.w, height: view.h, rx: 14,
+        width: view.w, height: view.h, rx: 12,
         fill: c.fill, stroke: c.stroke, 'stroke-width': 1.5,
       }));
-      drawLabel(g, view, 0);
+      drawLabel(g, view, 0, 0);
       break;
     }
     case 'gateway': {
@@ -36,8 +42,8 @@ export function drawNode(view: NodeView): SVGGElement {
         fill: c.fill, stroke: c.stroke, 'stroke-width': 1.5,
       }));
       const t = svgEl('text', {
-        x: r, y: r, 'text-anchor': 'middle', 'dominant-baseline': 'central',
-        'font-size': 13, 'font-weight': 700, fill: c.text,
+        x: r, y: r + 13 * CAP_RATIO, 'text-anchor': 'middle',
+        'font-size': 12, 'font-weight': 700, fill: c.text,
         'font-family': FONT_FAMILY,
       });
       t.textContent = view.node.type === 'gateway' ? view.node.operator : '';
@@ -55,14 +61,15 @@ export function drawNode(view: NodeView): SVGGElement {
         x1: sx, y1: cy - h, x2: sx, y2: cy + h,
         stroke: c.stroke, 'stroke-width': 2,
       }));
-      drawLabel(g, view, 10);
+      // Label is centered in the space right of the stripe, not in the whole ellipse.
+      drawLabel(g, view, 0, 12);
       break;
     }
     case 'document': {
       const w = view.w, h = view.h;
-      const wave = `M0,0 L${w},0 L${w},${h - 12} Q${(3 * w) / 4},${h + 2} ${w / 2},${h - 12} Q${w / 4},${h - 26} 0,${h - 12} Z`;
+      const wave = `M0,0 L${w},0 L${w},${h - 11} Q${(3 * w) / 4},${h + 2} ${w / 2},${h - 11} Q${w / 4},${h - 24} 0,${h - 11} Z`;
       g.appendChild(svgEl('path', { d: wave, fill: c.fill, stroke: c.stroke, 'stroke-width': 1.5 }));
-      drawLabel(g, view, -6);
+      drawLabel(g, view, -5, 0);
       break;
     }
     case 'system': {
@@ -76,24 +83,24 @@ export function drawNode(view: NodeView): SVGGElement {
           stroke: c.stroke, 'stroke-width': 1.2,
         }));
       }
-      drawLabel(g, view, 0);
+      drawLabel(g, view, 0, 0);
       break;
     }
   }
   return g;
 }
 
-export const FONT_FAMILY = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
-
-function drawLabel(g: SVGGElement, view: NodeView, dy: number): void {
+/** Multi-line label, block centered on the shape's visual middle. */
+function drawLabel(g: SVGGElement, view: NodeView, dy: number, dx: number): void {
   if (view.lines.length === 0) return;
   const c = COLORS[view.node.type];
-  const startX = view.w / 2;
-  const startY = view.h / 2 - ((view.lines.length - 1) * view.lineH) / 2 + dy;
+  const cx = view.w / 2 + dx;
+  const top = view.h / 2 + dy - ((view.lines.length - 1) * view.lineH) / 2;
   view.lines.forEach((line, i) => {
     const t = svgEl('text', {
-      x: startX, y: startY + i * view.lineH,
-      'text-anchor': 'middle', 'dominant-baseline': 'central',
+      x: cx,
+      y: top + i * view.lineH + view.font * CAP_RATIO,
+      'text-anchor': 'middle',
       'font-size': view.font, fill: c.text, 'font-family': FONT_FAMILY,
     });
     t.textContent = line;

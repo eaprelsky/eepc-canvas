@@ -107,13 +107,30 @@ describe('router: bundled examples', () => {
     });
   }
 
-  it('spreads multiple outgoing ports of a gateway apart', () => {
+  it('starts and ends every arrow at the exact shape center port', () => {
     const { l } = load(example01);
-    const fromG1 = l.flows.filter(f => f.edge.from === 'g1');
-    expect(fromG1.length).toBeGreaterThanOrEqual(2);
-    const xs = fromG1.map(f => f.points[0].x);
-    const uniq = new Set(xs);
-    expect(uniq.size).toBe(xs.length);
+    const viewOf = new Map(l.views.map(v => [v.node.id, v]));
+    for (const f of l.flows) {
+      const src = viewOf.get(f.edge.from)!;
+      const dst = viewOf.get(f.edge.to)!;
+      expect(f.points[0].x).toBe(src.x + src.w / 2);
+      expect(f.points[0].y).toBe(src.y + src.h);
+      expect(f.points[f.points.length - 1].x).toBe(dst.x + dst.w / 2);
+      expect(f.points[f.points.length - 1].y).toBe(dst.y);
+    }
+  });
+
+  it('never leaves step-like segments shorter than 20 px', () => {
+    const { l } = load(example02);
+    const checkSegments = (points: Array<{ x: number; y: number }>) => {
+      if (points.length <= 2) return;
+      for (let i = 1; i < points.length; i++) {
+        const len = Math.abs(points[i].x - points[i - 1].x) + Math.abs(points[i].y - points[i - 1].y);
+        expect(len, `segment ${i} of ${JSON.stringify(points)}`).toBeGreaterThanOrEqual(20);
+      }
+    };
+    for (const f of l.flows) checkSegments(f.points);
+    for (const at of l.attachments) checkSegments(at.points);
   });
 
   it('routes attachments for every attached element', () => {

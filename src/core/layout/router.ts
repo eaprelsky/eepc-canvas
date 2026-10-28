@@ -1,7 +1,7 @@
-import { CLEARANCE, GRID, SOFT_CLEARANCE } from '../constants';
-import { bboxOf, gridFloor, gridRound } from '../geom';
+import { CLEARANCE, GRID, MIN_SEGMENT, SOFT_CLEARANCE } from '../constants';
+import { bboxOf, gridFloor, gridRound, rectsOverlap } from '../geom';
 import type {
-  AttachedNode, Diagram, Dir, FlowEdge, NodeView, Point, RoutedAttachment, RoutedFlow,
+  AttachedNode, Diagram, Dir, NodeView, Point, Rect, RoutedAttachment, RoutedFlow,
 } from '../types';
 import { isMainNode } from '../types';
 
@@ -23,8 +23,12 @@ interface RouterCtx {
   occupied: Map<number, number>;
 }
 
+function viewRect(v: NodeView): Rect {
+  return { x: v.x, y: v.y, w: v.w, h: v.h };
+}
+
 function ctxFor(views: NodeView[]): RouterCtx {
-  const bb = bboxOf(views.map(v => ({ x: v.x, y: v.y, w: v.w, h: v.h })));
+  const bb = bboxOf(views.map(viewRect));
   const margin = 80;
   const x0 = gridFloor(bb.x - margin);
   const y0 = gridFloor(bb.y - margin);
@@ -51,6 +55,23 @@ function ctxFor(views: NodeView[]): RouterCtx {
     }
   }
   return { x0, y0, cols, rows, blocked, soft, occupied: new Map() };
+}
+
+/** Is the corridor along an axis-aligned segment free of shapes?
+ *  The segment is inflated by CLEARANCE; ignored nodes are skipped. */
+function segmentClear(
+  views: NodeView[],
+  a: Point,
+  b: Point,
+  ignore: Set<string>,
+): boolean {
+  const x1 = Math.min(a.x, b.x) - CLEARANCE;
+  const x2 = Math.max(a.x, b.x) + CLEARANCE;
+  const y1 = Math.min(a.y, b.y) - CLEARANCE;
+  const y2 = Math.max(a.y, b.y) + CLEARANCE;
+  const corridor: Rect = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+  return !views.some(v =>
+    !ignore.has(v.node.id) && rectsOverlap(corridor, viewRect(v), -0.01));
 }
 
 // ── Binary heap keyed by f ────────────────────────────────────────────────────
@@ -204,14 +225,126 @@ export function simplify(points: Point[]): Point[] {
   return out;
 }
 
-// ── Diagram-level routing ─────────────────────────────────────────────────────
+/** Remove "step" jigs: a sub-MIN_SEGMENT jog segment between two parallel
+ *  segments is merged by snapping the corner to the neighbour line when the
+ *  shifted corridors stay clear. Endpoints (ports) never move.
+ *  Pattern: A→B (long) → B→C (jog) → C→D (long), B→C perpendicular to both. */
+function removeJogs(points: Point[], views: NodeView[]): Point[] {
+  let current = points;
+  for (let pass = 0; pass < 4; pass++) {
+    let changed = false;
+    for (let i = 1; i < current.length - 2 && !changed; i++) {
+      const A = current[i - 1];
+      const B = current[i];
+      const C = current[i + 1];
+      const D = current[i + 2];
+      const jogVertical = A.y === B.y && B.x === C.x && C.y === D.y && Math.abs(B.y - C.y) > 0;
+      const jogHorizontal = A.x === B.x && B.y === C.y && C.x === D.x && Math.abs(B.x - C.x) > 0;
+      const jogLen = jogVertical ? Math.abs(B.y - C.y) : jogHorizontal ? Math.abs(B.x - C.x) : 0;
+      if (jogLen === 0 || jogLen >= MIN_SEGMENT) continue;
+      const isFirstSegment = i - 1 === 0;
+      const isLastSegment = i + 2 === current.length - 1;
 
-function bottomPort(v: NodeView, offset: number): Point {
-  return { x: gridRound(v.x + v.w / 2 + offset), y: v.y + v.h };
+      if (jogVertical) {
+        // Variant 1: lift the C–D corner onto B's line, drop the jog point C.
+        if (!isLastSegment) {
+          const D2 = { x: D.x, y: B.y };
+          const cornerShift = { x: D.x, y: C.y };
+          if (segmentClear(views, B, D2, new Set()) &&
+              segmentClear(views, cornerShift, D2, new Set())) {
+            current = [...current.slice(0, i + 1), D2, ...current.slice(i + 3)];
+            changed = true;
+            break;
+          }
+        }
+        // Variant 2: lower the prev–A corner onto C's line, drop the jog point B.
+        if (!isFirstSegment) {
+          const A2 = { x: A.x, y: C.y };
+          if (segmentClear(views, A2, C, new Set()) &&
+              segmentClear(views, A, A2, new Set())) {
+            current = [...current.slice(0, i - 1), A2, ...current.slice(i + 1)];
+            changed = true;
+            break;
+          }
+        }
+      } else if (jogHorizontal) {
+        // Variant 1: shift the C–D corner onto B's line.
+        if (!isLastSegment) {
+          const D2 = { x: B.x, y: D.y };
+          const cornerShift = { x: C.x, y: D.y };
+          if (segmentClear(views, B, D2, new Set()) &&
+              segmentClear(views, cornerShift, D2, new Set())) {
+            current = [...current.slice(0, i + 1), D2, ...current.slice(i + 3)];
+            changed = true;
+            break;
+          }
+        }
+        // Variant 2: shift the prev–A corner onto C's line.
+        if (!isFirstSegment) {
+          const A2 = { x: C.x, y: A.y };
+          if (segmentClear(views, A2, C, new Set()) &&
+              segmentClear(views, A, A2, new Set())) {
+            current = [...current.slice(0, i - 1), A2, ...current.slice(i + 1)];
+            changed = true;
+            break;
+          }
+        }
+      }
+    }
+    current = simplify(current);
+    if (!changed) break;
+  }
+  return current;
 }
-function topPort(v: NodeView, offset: number): Point {
-  return { x: gridRound(v.x + v.w / 2 + offset), y: v.y };
+
+// ── Canonical (template) routes ───────────────────────────────────────────────
+
+/** Straight or single-S route for a clean downward edge; null if blocked. */
+function canonicalFlow(s: NodeView, t: NodeView, views: NodeView[]): Point[] | null {
+  const p1 = { x: s.x + s.w / 2, y: s.y + s.h };
+  const p2 = { x: t.x + t.w / 2, y: t.y };
+  if (p2.y <= p1.y + MIN_SEGMENT * 2) return null; // only clean downward edges
+  const ignore = new Set([s.node.id, t.node.id]);
+  if (p1.x === p2.x) {
+    if (segmentClear(views, p1, p2, ignore)) return [p1, p2];
+    return null;
+  }
+  if (Math.abs(p1.x - p2.x) < MIN_SEGMENT) return null;
+  const midY = gridRound((p1.y + p2.y) / 2);
+  if (midY - p1.y < MIN_SEGMENT || p2.y - midY < MIN_SEGMENT) return null;
+  const m1 = { x: p1.x, y: midY };
+  const m2 = { x: p2.x, y: midY };
+  if (!segmentClear(views, p1, m1, ignore)) return null;
+  if (!segmentClear(views, m1, m2, ignore)) return null;
+  if (!segmentClear(views, m2, p2, ignore)) return null;
+  return [p1, m1, m2, p2];
 }
+
+/** Straight or Z-elbow route for a function ↔ attachment connector; null if blocked. */
+function canonicalAttachment(fv: NodeView, av: NodeView, views: NodeView[]): Point[] | null {
+  const a = av.node as AttachedNode;
+  const p1 = a.side === 'right'
+    ? { x: fv.x + fv.w, y: fv.y + fv.h / 2 }
+    : { x: fv.x, y: fv.y + fv.h / 2 };
+  const p2 = a.side === 'right'
+    ? { x: av.x, y: av.y + av.h / 2 }
+    : { x: av.x + av.w, y: av.y + av.h / 2 };
+  const ignore = new Set([fv.node.id, av.node.id]);
+  if (p1.y === p2.y) {
+    if (segmentClear(views, p1, p2, ignore)) return [p1, p2];
+    return null;
+  }
+  const midX = gridRound((p1.x + p2.x) / 2);
+  if (Math.abs(midX - p1.x) < MIN_SEGMENT || Math.abs(p2.x - midX) < MIN_SEGMENT) return null;
+  const m1 = { x: midX, y: p1.y };
+  const m2 = { x: midX, y: p2.y };
+  if (!segmentClear(views, p1, m1, ignore)) return null;
+  if (!segmentClear(views, m1, m2, ignore)) return null;
+  if (!segmentClear(views, m2, p2, ignore)) return null;
+  return [p1, m1, m2, p2];
+}
+
+// ── Diagram-level routing ─────────────────────────────────────────────────────
 
 export function routeDiagram(
   d: Diagram,
@@ -222,38 +355,6 @@ export function routeDiagram(
   const viewOf = new Map(views.map(v => [v.node.id, v]));
   const ctx = ctxFor(views);
 
-  // Group flows per endpoint and spread ports along the borders.
-  const outGroups = new Map<string, FlowEdge[]>();
-  const inGroups = new Map<string, FlowEdge[]>();
-  for (const f of d.flows) {
-    const fv = viewOf.get(f.from);
-    const tv = viewOf.get(f.to);
-    if (!fv || !tv) continue;
-    if (!isMainNode(fv.node) || !isMainNode(tv.node)) continue;
-    if (!outGroups.has(f.from)) outGroups.set(f.from, []);
-    outGroups.get(f.from)!.push(f);
-    if (!inGroups.has(f.to)) inGroups.set(f.to, []);
-    inGroups.get(f.to)!.push(f);
-  }
-  const cx = (v: NodeView) => v.x + v.w / 2;
-  for (const list of outGroups.values()) {
-    list.sort((a, b) => cx(viewOf.get(a.to)!) - cx(viewOf.get(b.to)!));
-  }
-  for (const list of inGroups.values()) {
-    list.sort((a, b) => cx(viewOf.get(a.from)!) - cx(viewOf.get(b.from)!));
-  }
-  const outPort = new Map<string, Point>();
-  const inPort = new Map<string, Point>();
-  for (const [id, list] of outGroups) {
-    const v = viewOf.get(id)!;
-    list.forEach((f, i) => outPort.set(f.id, bottomPort(v, (i - (list.length - 1) / 2) * 20)));
-  }
-  for (const [id, list] of inGroups) {
-    const v = viewOf.get(id)!;
-    list.forEach((f, i) => inPort.set(f.id, topPort(v, (i - (list.length - 1) / 2) * 20)));
-  }
-
-  // Attachments first: short horizontal lines, deterministic order.
   const attachments: RoutedAttachment[] = [];
   for (const v of views) {
     const t = v.node.type;
@@ -262,26 +363,38 @@ export function routeDiagram(
     const fv = viewOf.get(a.attachTo);
     if (!fv) continue;
     const dir = a.type === 'role' ? null : (a.dir ?? 'in');
-    if (a.side === 'right') {
-      const from: Point = { x: fv.x + fv.w, y: fv.y + fv.h / 2 };
-      const to: Point = { x: v.x, y: v.y + v.h / 2 };
-      const r = routeSegment(ctx, from, 'right', to, 'right');
-      attachments.push({ nodeId: a.id, functionId: a.attachTo, dir, points: r.points });
-    } else {
-      const from: Point = { x: fv.x, y: fv.y + fv.h / 2 };
-      const to: Point = { x: v.x + v.w, y: v.y + v.h / 2 };
-      const r = routeSegment(ctx, from, 'left', to, 'left');
-      attachments.push({ nodeId: a.id, functionId: a.attachTo, dir, points: r.points });
+    const canonical = canonicalAttachment(fv, v, views);
+    if (canonical) {
+      attachments.push({ nodeId: a.id, functionId: a.attachTo, dir, points: canonical });
+      continue;
     }
+    const from: Point = a.side === 'right'
+      ? { x: fv.x + fv.w, y: fv.y + fv.h / 2 }
+      : { x: fv.x, y: fv.y + fv.h / 2 };
+    const to: Point = a.side === 'right'
+      ? { x: v.x, y: v.y + v.h / 2 }
+      : { x: v.x + v.w, y: v.y + v.h / 2 };
+    const r = routeSegment(ctx, from, a.side === 'right' ? 'right' : 'left',
+      to, a.side === 'right' ? 'right' : 'left');
+    attachments.push({ nodeId: a.id, functionId: a.attachTo, dir, points: r.points });
   }
 
   const flows: RoutedFlow[] = [];
   for (const f of d.flows) {
-    const from = outPort.get(f.id);
-    const to = inPort.get(f.id);
-    if (!from || !to) continue;
+    const sv = viewOf.get(f.from) as NodeView | undefined;
+    const tv = viewOf.get(f.to) as NodeView | undefined;
+    if (!sv || !tv) continue;
+    if (!isMainNode(sv.node) || !isMainNode(tv.node)) continue;
+    const canonical = canonicalFlow(sv, tv, views);
+    if (canonical) {
+      flows.push({ edge: f, points: canonical, degraded: false });
+      continue;
+    }
+    const from = { x: sv.x + sv.w / 2, y: sv.y + sv.h };
+    const to = { x: tv.x + tv.w / 2, y: tv.y };
     const r = routeSegment(ctx, from, 'down', to, 'down');
-    flows.push({ edge: f, points: r.points, degraded: r.degraded });
+    const cleaned = r.degraded ? r.points : removeJogs(r.points, views);
+    flows.push({ edge: f, points: cleaned, degraded: r.degraded });
   }
 
   return { flows, attachments };

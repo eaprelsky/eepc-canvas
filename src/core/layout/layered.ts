@@ -20,8 +20,16 @@ interface ONode {
 /**
  * Layered top-down layout (Sugiyama-lite):
  * cycle removal → longest-path layering → virtual nodes for long edges →
- * barycenter ordering sweeps → grid coordinates with reserved bands for
- * attached roles/documents/systems.
+ * barycenter ordering sweeps → spine alignment → grid coordinates with
+ * reserved bands for attached roles/documents/systems.
+ *
+ * Aesthetic contract:
+ *  - every layer's main row is anchored to the top of its band, so arrow
+ *    lengths between neighbour layers stay uniform;
+ *  - attachment stacks hang DOWN from their function; the first attachment
+ *    always sits in the function's own row;
+ *  - chains are aligned vertically onto their predecessor's center whenever
+ *    neighbour gaps allow, so straight lines stay straight.
  */
 export function computeAutoLayout(d: Diagram): AutoLayoutResult {
   const mainEls = d.nodes.filter(isMainNode);
@@ -97,20 +105,15 @@ export function computeAutoLayout(d: Diagram): AutoLayoutResult {
 
   // ── Virtual nodes for edges spanning several layers ──
   const onodes: ONode[] = [];
-  const byKey = new Map<string, ONode>();
-  for (const id of ids) {
-    const n: ONode = { key: id, layer: layer.get(id)!, virtual: false, realId: id };
-    onodes.push(n); byKey.set(id, n);
-  }
-  const orderEdges: Array<[string, string]> = []; // edges between adjacent layers
+  for (const id of ids) onodes.push({ key: id, layer: layer.get(id)!, virtual: false, realId: id });
+  const orderEdges: Array<[string, string]> = [];
   let vCounter = 0;
   for (const [a, b] of dagEdges) {
     const la = layer.get(a)!, lb = layer.get(b)!;
     let prev = a;
     for (let l = la + 1; l < lb; l++) {
       const key = `__v${vCounter++}`;
-      const n: ONode = { key, layer: l, virtual: true };
-      onodes.push(n); byKey.set(key, n);
+      onodes.push({ key, layer: l, virtual: true });
       orderEdges.push([prev, key]);
       prev = key;
     }
@@ -119,10 +122,9 @@ export function computeAutoLayout(d: Diagram): AutoLayoutResult {
 
   const layerList: ONode[][] = Array.from({ length: numLayers }, () => []);
   for (const n of onodes) layerList[n.layer].push(n);
-  // Stable initial order within a layer.
   for (const list of layerList) list.sort((a, b) => (a.realId ?? a.key).localeCompare(b.realId ?? b.key, 'en'));
 
-  const down = new Map<string, string[]>(); // node -> neighbours on the next layer
+  const down = new Map<string, string[]>();
   const up = new Map<string, string[]>();
   for (const n of onodes) { down.set(n.key, []); up.set(n.key, []); }
   for (const [a, b] of orderEdges) { down.get(a)!.push(b); up.get(b)!.push(a); }
@@ -184,6 +186,9 @@ export function computeAutoLayout(d: Diagram): AutoLayoutResult {
     if (!fitOf.has(id)) fitOf.set(id, fitNodeText(type, label));
     return fitOf.get(id)!;
   };
+  const typeOf = (id: string): NodeType =>
+    (d.nodes.find(n => n.id === id)?.type ?? 'event') as NodeType;
+  const labelOfNode = (id: string): string => d.nodes.find(n => n.id === id)?.label ?? '';
 
   const sideStackWidth = (fid: string, side: 'left' | 'right'): number => {
     const list = (side === 'left' ? leftOf : rightOf).get(fid) ?? [];
@@ -199,11 +204,13 @@ export function computeAutoLayout(d: Diagram): AutoLayoutResult {
     let cursor = 0;
     for (const n of layerList[l]) {
       if (n.virtual) { xOf.set(n.key, cursor); continue; }
-      const fit = getFit(n.realId!, mainTypeOf(d, n.realId!), labelOf(d, n.realId!));
-      const leftW = n.realId && mainTypeOf(d, n.realId!) === 'function' ? sideStackWidth(n.realId, 'left') : 0;
-      const rightW = n.realId && mainTypeOf(d, n.realId!) === 'function' ? sideStackWidth(n.realId, 'right') : 0;
+      const fit = getFit(n.realId!, typeOf(n.realId!), labelOfNode(n.realId!));
+      const w = n.realId && typeOf(n.realId!) === 'gateway' ? GATEWAY_D : fit.w;
+      const isFunc = n.realId !== undefined && typeOf(n.realId!) === 'function';
+      const leftW = isFunc ? sideStackWidth(n.realId!, 'left') : 0;
+      const rightW = isFunc ? sideStackWidth(n.realId!, 'right') : 0;
       xOf.set(n.key, cursor + leftW);
-      cursor = cursor + leftW + fit.w + rightW + H_GAP;
+      cursor = cursor + leftW + w + rightW + H_GAP;
     }
     layerWidths.push(Math.max(0, cursor - H_GAP));
   }
@@ -214,11 +221,54 @@ export function computeAutoLayout(d: Diagram): AutoLayoutResult {
     xOf.set(n.key, PADDING + layerOffset[n.layer] + xOf.get(n.key)!);
   }
 
-  // ── Y bands: reserve room for stacked attachments ──
+  // ── Spine alignment: pull chains onto their predecessor's center ──
+  const nodeW = (id: string): number =>
+    typeOf(id) === 'gateway' ? GATEWAY_D : getFit(id, typeOf(id), labelOfNode(id)).w;
+
+  for (let sweep = 0; sweep < 2; sweep++) {
+    for (let l = 1; l < numLayers; l++) {
+      const cells = layerList[l].filter(n => !n.virtual).map(n => {
+        const id = n.realId!;
+        const isFunc = typeOf(id) === 'function';
+        return {
+          key: n.key,
+          id,
+          x: xOf.get(n.key)!,
+          w: nodeW(id),
+          leftW: isFunc ? sideStackWidth(id, 'left') : 0,
+          rightW: isFunc ? sideStackWidth(id, 'right') : 0,
+        };
+      });
+      for (let idx = 0; idx < cells.length; idx++) {
+        const cell = cells[idx];
+        const preds = (dagPred.get(cell.id) ?? []).filter(p => xOf.has(p));
+        if (preds.length === 0) continue;
+        const predCxs = preds.map(p => xOf.get(p)! + nodeW(p) / 2).sort((a, b) => a - b);
+        const desired = predCxs.length === 1 ? predCxs[0] : predCxs[Math.floor(predCxs.length / 2)];
+        const current = cell.x + cell.w / 2;
+        if (Math.abs(desired - current) < 1) continue;
+        // Clamp so neighbour cells (with their attachment reservations) keep H_GAP.
+        const minX = idx > 0
+          ? cells[idx - 1].x + cells[idx - 1].w + cells[idx - 1].rightW + H_GAP + cell.leftW
+          : -Infinity;
+        const maxX = idx < cells.length - 1
+          ? cells[idx + 1].x - cells[idx + 1].leftW - H_GAP - cell.rightW - cell.w
+          : Infinity;
+        const target = Math.min(Math.max(cell.x + (desired - current), minX), maxX);
+        const shift = gridRound(target - cell.x);
+        if (shift !== 0) {
+          cell.x += shift;
+          xOf.set(cell.key, cell.x);
+        }
+      }
+    }
+  }
+
+  // ── Y bands: every main row is anchored to the band top; stacks hang down ──
   const bandExtra = (l: number): number => {
     let maxStack = 1;
     for (const n of layerList[l]) {
-      if (!n.realId || mainTypeOf(d, n.realId!) !== 'function') continue;
+      if (!n.realId || typeOf(n.realId!) !== 'function') continue;
       const stack = Math.max((leftOf.get(n.realId) ?? []).length, (rightOf.get(n.realId) ?? []).length);
       maxStack = Math.max(maxStack, stack);
     }
@@ -242,7 +292,7 @@ export function computeAutoLayout(d: Diagram): AutoLayoutResult {
     const fit = getFit(node.id, node.type, node.label);
     const isGw = node.type === 'gateway';
     const h = isGw ? GATEWAY_D : NODE_H;
-    const yy = layerY[n.layer] + gridRound((bandH[n.layer] - h) / 2);
+    const yy = isGw ? layerY[n.layer] + (NODE_H - GATEWAY_D) / 2 : layerY[n.layer];
     const xx = gridRound(xOf.get(n.key)!);
     views.push({
       node, x: xx, y: yy, w: isGw ? GATEWAY_D : fit.w, h,
@@ -250,7 +300,7 @@ export function computeAutoLayout(d: Diagram): AutoLayoutResult {
     });
   }
 
-  // ── Views for attached elements, stacked around their function ──
+  // ── Views for attached elements, stacked downward from their function ──
   const viewOf = new Map(views.map(v => [v.node.id, v]));
   const attachViews = placeAttachments(d, viewOf);
 
@@ -276,17 +326,18 @@ export function attachmentLists(d: Diagram): {
   return { leftOf, rightOf };
 }
 
-/** Place attached roles/documents/systems in centered stacks beside their functions. */
+/** Place attached roles/documents/systems in a stack below the function;
+ *  the first attachment always shares the function's row. */
 export function placeAttachments(d: Diagram, viewOf: Map<string, NodeView>): NodeView[] {
   const { leftOf, rightOf } = attachmentLists(d);
   const out: NodeView[] = [];
+  const pitch = NODE_H + SIDE_V_GAP;
   const emit = (fid: string, list: AttachedNode[], isLeft: boolean) => {
     const fv = viewOf.get(fid);
     if (!fv) return;
-    const pitch = NODE_H + SIDE_V_GAP;
     list.forEach((a, i) => {
       const fit = fitNodeText(a.type, a.label);
-      const yy = gridRound(fv.y + (i - (list.length - 1) / 2) * pitch);
+      const yy = gridRound(fv.y + i * pitch);
       const xx = isLeft ? fv.x - SIDE_GAP - fit.w : fv.x + fv.w + SIDE_GAP;
       out.push({
         node: a, x: xx, y: yy, w: fit.w, h: NODE_H,
@@ -297,11 +348,4 @@ export function placeAttachments(d: Diagram, viewOf: Map<string, NodeView>): Nod
   for (const [fid, list] of leftOf) emit(fid, list, true);
   for (const [fid, list] of rightOf) emit(fid, list, false);
   return out;
-}
-
-function mainTypeOf(d: Diagram, id: string): NodeType {
-  return (d.nodes.find(n => n.id === id)?.type ?? 'event') as NodeType;
-}
-function labelOf(d: Diagram, id: string): string {
-  return d.nodes.find(n => n.id === id)?.label ?? '';
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { autoArrange, layoutDiagram } from '../layout';
+import { attachmentLists } from '../layout/layered';
 import { emptyDiagram, makeNode } from '../model';
 import type { Diagram, LayoutedDiagram, NodeView } from '../types';
 import { isAttachedNode, isMainNode } from '../types';
@@ -80,6 +81,41 @@ describe('auto layout: bundled examples', () => {
       } else {
         expect(v.x >= f.x + f.w).toBe(true);
       }
+    }
+  });
+
+  it('puts the first attachment in the function row (stack goes down)', () => {
+    const d = parse(example01);
+    const l = autoArrange(d);
+    const viewOf = new Map(l.views.map(v => [v.node.id, v]));
+    const { leftOf, rightOf } = attachmentLists(d);
+    for (const [map, isLeft] of [[leftOf, true], [rightOf, false]] as const) {
+      for (const [fid, list] of map) {
+        if (list.length === 0) continue;
+        const f = viewOf.get(fid)!;
+        const first = viewOf.get(list[0].id)!;
+        expect(first.y, `${isLeft ? 'left' : 'right'} first attachment of ${fid}`).toBe(f.y);
+      }
+    }
+  });
+
+  it('aligns a chain vertically even when element widths differ', () => {
+    const d = emptyDiagram('Разные ширины');
+    const e1 = makeNode(d, 'event', 'Старт');
+    d.nodes.push(e1);
+    const f1 = makeNode(d, 'function', 'Провести полную проверку всех документов заявителя');
+    d.nodes.push(f1);
+    const e2 = makeNode(d, 'event', 'Проверка завершена');
+    d.nodes.push(e2);
+    d.flows.push(
+      { id: 'fl1', from: e1.id, to: f1.id },
+      { id: 'fl2', from: f1.id, to: e2.id },
+    );
+    const l = autoArrange(d);
+    for (const f of l.flows) {
+      expect(f.points).toHaveLength(2);
+      expect(f.points[0].x).toBe(f.points[1].x);
+      expect(f.degraded).toBe(false);
     }
   });
 
