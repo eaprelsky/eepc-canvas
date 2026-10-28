@@ -214,6 +214,29 @@ html, body, #app {
 
 .eepc-port { cursor: crosshair; }
 
+/* Rubber band for multi-selection. */
+.eepc-band {
+  fill: rgba(37, 99, 235, 0.08);
+  stroke: #2563eb;
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+/* Inline rename field over a shape. */
+.eepc-inline-input {
+  position: absolute;
+  z-index: 5;
+  border: 2px solid var(--eepc-accent);
+  border-radius: 10px;
+  background: #ffffff;
+  text-align: center;
+  font-family: inherit;
+  color: var(--eepc-text);
+  padding: 0 6px;
+  outline: none;
+  box-shadow: 0 4px 16px rgba(31, 36, 48, 0.18);
+}
+
 /* ── Toast ── */
 
 .eepc-toast {

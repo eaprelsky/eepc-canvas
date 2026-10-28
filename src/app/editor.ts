@@ -1,58 +1,68 @@
 import {
   GRID, isAttachedNode, isMainNode, layoutDiagram, renderLayouted, SELECT_COLOR,
-  addFlow, makeNode, removeNode, canConnect, svgEl,
+  addFlow, attachmentsOf, makeNode, nodeById, removeNode, canConnect,
 } from '../core';
-import type { Diagram, GatewayOperator, LayoutedDiagram, NodeView, NodeType, Point } from '../core';
+import type { Diagram, LayoutedDiagram, NodeView, NodeType, Point } from '../core';
 import { autoArrange, buildViews } from '../core/layout';
 import { rectsOverlap, gridRound } from '../core/geom';
 import { DiagramStore } from './store';
 import { mountToolbar } from './toolbar';
 import { mountPalette } from './palette';
 import { mountInspector } from './inspector';
+import { svgEl } from '../core';
 
-export type Tool =
-  | { kind: 'select' }
-  | { kind: 'create'; type: NodeType; operator?: GatewayOperator };
+export type Tool = { kind: 'select' } | { kind: 'create'; type: NodeType; operator?: import('../core').GatewayOperator };
 
 export interface EditorContext {
   readonly store: DiagramStore;
   readonly layouted: LayoutedDiagram;
-  readonly selection: string | null;
+  readonly selection: ReadonlySet<string>;
   readonly tool: Tool;
   select(id: string | null): void;
+  setSelection(ids: Iterable<string>): void;
+  toggleSelect(id: string): void;
   setTool(tool: Tool): void;
+  copySelection(): void;
+  pasteClipboard(): void;
+  duplicateSelection(): void;
   autoArrange(): void;
   fitView(): void;
   zoomBy(factor: number): void;
   getZoom(): number;
   toast(message: string): void;
   requestRender(): void;
-  focusLabelEditor(): void;
-  labelFocusTick: number;
   onChange(cb: () => void): () => void;
   exportSvgElement(): SVGSVGElement | null;
 }
 
 type Gesture =
   | { type: 'none' }
-  | { type: 'maybe-drag'; nodeId: string; grabDx: number; grabDy: number; startX: number; startY: number }
-  | { type: 'drag'; nodeId: string; grabDx: number; grabDy: number }
+  | { type: 'maybe-drag'; nodeId: string; startX: number; startY: number }
+  | { type: 'drag'; offsets: Map<string, Point> }
   | { type: 'connect'; fromId: string; dir: 'in' | 'out'; to: Point }
   | { type: 'pan'; startX: number; startY: number; tx0: number; ty0: number; moved: boolean }
-  | { type: 'maybe-click-create'; startX: number; startY: number };
+  | { type: 'maybe-click-create'; startX: number; startY: number }
+  | { type: 'maybe-band'; start: Point; startX: number; startY: number; additive: boolean }
+  | { type: 'band'; start: Point; cur: Point; additive: boolean };
+
+interface ClipData {
+  mains: Array<{ id: string; type: NodeType; label: string; operator?: string; x?: number; y?: number }>;
+  attached: Array<{ id: string; type: NodeType; label: string; attachTo: string; side: 'left' | 'right'; dir?: 'in' | 'out' | 'both' }>;
+  flows: Array<{ from: string; to: string }>;
+}
 
 const AUTOSAVE_KEY = 'eepc-canvas:autosave';
 
 export class Editor implements EditorContext {
   readonly store: DiagramStore;
   layouted: LayoutedDiagram;
-  selection: string | null = null;
+  selection: ReadonlySet<string> = new Set<string>();
   tool: Tool = { kind: 'select' };
-  labelFocusTick = 0;
 
   private root: HTMLDivElement;
   private svg: SVGSVGElement;
   private world: SVGGElement;
+  private canvasWrap: HTMLDivElement;
   private viewport = { scale: 1, tx: 0, ty: 0 };
   private gesture: Gesture = { type: 'none' };
   private hoverNodeId: string | null = null;
@@ -64,6 +74,9 @@ export class Editor implements EditorContext {
   private renderCount = 0;
   private autosaveTimer: ReturnType<typeof setTimeout> | null = null;
   private unsubs: Array<() => void> = [];
+  private clipboard: ClipData | null = null;
+  private renameEl: HTMLInputElement | null = null;
+  private renameId: string | null = null;
 
   constructor(container: HTMLElement, diagram: Diagram) {
     this.store = new DiagramStore(diagram);
@@ -80,15 +93,15 @@ export class Editor implements EditorContext {
     body.className = 'eepc-body';
     const palette = document.createElement('aside');
     palette.className = 'eepc-palette';
-    const wrap = document.createElement('div');
-    wrap.className = 'eepc-canvas-wrap';
+    this.canvasWrap = document.createElement('div');
+    this.canvasWrap.className = 'eepc-canvas-wrap';
     const inspector = document.createElement('aside');
     inspector.className = 'eepc-inspector';
     this.root.append(header, body);
-    body.append(palette, wrap, inspector);
+    body.append(palette, this.canvasWrap, inspector);
 
-    this.svg = svgEl('svg', { class: 'eepc-canvas' }) as SVGSVGElement;
-    wrap.appendChild(this.svg);
+    this.svg = svgEl('svg', { class: 'eepc-canvas' }) as unknown as SVGSVGElement;
+    this.canvasWrap.appendChild(this.svg);
     const defs = svgEl('defs');
     const pattern = svgEl('pattern', {
       id: 'eepc-grid-pattern', width: 20, height: 20, patternUnits: 'userSpaceOnUse',
@@ -112,13 +125,14 @@ export class Editor implements EditorContext {
 
     this.bindPointer();
     this.bindKeyboard();
-    this.resizeObserver(wrap);
+    this.resizeObserver(this.canvasWrap);
 
     this.renderScene();
     this.fitView();
   }
 
   destroy(): void {
+    this.closeRename(false);
     for (const u of this.unsubs) u();
     this.root.remove();
   }
@@ -126,7 +140,19 @@ export class Editor implements EditorContext {
   // ── EditorContext ──
 
   select(id: string | null): void {
-    this.selection = id;
+    this.setSelection(id ? [id] : []);
+  }
+
+  setSelection(ids: Iterable<string>): void {
+    this.selection = new Set(ids);
+    this.notify();
+    this.requestRender();
+  }
+
+  toggleSelect(id: string): void {
+    const next = new Set(this.selection);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    this.selection = next;
     this.notify();
     this.requestRender();
   }
@@ -156,9 +182,10 @@ export class Editor implements EditorContext {
 
   zoomBy(factor: number): void {
     const rect = this.svg.getBoundingClientRect();
-    const cx = rect.width / 2, cy = rect.height / 2;
-    this.zoomAt(cx, cy, factor);
+    this.zoomAt(rect.width / 2, rect.height / 2, factor);
   }
+
+  getZoom(): number { return this.viewport.scale; }
 
   toast(message: string): void {
     if (!this.toastEl) return;
@@ -177,11 +204,6 @@ export class Editor implements EditorContext {
     });
   }
 
-  focusLabelEditor(): void {
-    this.labelFocusTick++;
-    this.notify();
-  }
-
   onChange(cb: () => void): () => void {
     this.listeners.add(cb);
     return () => { this.listeners.delete(cb); };
@@ -192,7 +214,100 @@ export class Editor implements EditorContext {
     return renderLayouted(this.layouted, { background: '#ffffff', idPrefix: `x${++this.renderCount}` });
   }
 
-  getZoom(): number { return this.viewport.scale; }
+  // ── Clipboard ──
+
+  private collectSelection(): ClipData | null {
+    const d = this.store.diagram;
+    const mains: ClipData['mains'] = [];
+    for (const id of this.selection) {
+      const n = nodeById(d, id);
+      if (n && isMainNode(n)) {
+        mains.push({
+          id: n.id, type: n.type, label: n.label,
+          operator: n.type === 'gateway' ? n.operator : undefined,
+          x: n.x, y: n.y,
+        });
+      }
+    }
+    if (mains.length === 0) return null;
+    const mainSet = new Set(mains.map(m => m.id));
+    const attachedMap = new Map<string, ClipData['attached'][number]>();
+    for (const m of mains) {
+      for (const a of attachmentsOf(d, m.id)) {
+        attachedMap.set(a.id, {
+          id: a.id, type: a.type, label: a.label,
+          attachTo: a.attachTo, side: a.side, dir: a.dir,
+        });
+      }
+    }
+    // Explicitly selected attachments whose function is also selected.
+    for (const id of this.selection) {
+      const n = nodeById(d, id);
+      if (n && isAttachedNode(n) && mainSet.has(n.attachTo) && !attachedMap.has(id)) {
+        attachedMap.set(id, { id: n.id, type: n.type, label: n.label, attachTo: n.attachTo, side: n.side, dir: n.dir });
+      }
+    }
+    const flows = d.flows
+      .filter(f => mainSet.has(f.from) && mainSet.has(f.to))
+      .map(f => ({ from: f.from, to: f.to }));
+    return { mains, attached: [...attachedMap.values()], flows };
+  }
+
+  copySelection(): void {
+    const clip = this.collectSelection();
+    if (!clip) { this.toast('Выберите элементы для копирования'); return; }
+    this.clipboard = clip;
+    this.toast(`Скопировано элементов: ${clip.mains.length + clip.attached.length}`);
+  }
+
+  pasteClipboard(): void {
+    this.paste({ dx: 60, dy: 60 });
+  }
+
+  duplicateSelection(): void {
+    const clip = this.collectSelection();
+    if (!clip) { this.toast('Выберите элементы для дублирования'); return; }
+    this.clipboard = clip;
+    this.paste({ dx: 40, dy: 40 });
+  }
+
+  private paste(offset: { dx: number; dy: number }): void {
+    const clip = this.clipboard;
+    if (!clip || clip.mains.length === 0) { this.toast('Буфер обмена пуст'); return; }
+    this.store.mutate(d => {
+      const idMap = new Map<string, string>();
+      for (const m of clip.mains) {
+        const copy = makeNode(d, m.type, m.label, {
+          operator: m.type === 'gateway' ? (m.operator as import('../core').GatewayOperator) : undefined,
+          x: (m.x ?? 0) + offset.dx,
+          y: (m.y ?? 0) + offset.dy,
+        });
+        d.nodes.push(copy);
+        idMap.set(m.id, copy.id);
+        const free = this.findFreePosition(copy.id);
+        if (free) { copy.x = free.x; copy.y = free.y; }
+      }
+      for (const a of clip.attached) {
+        const target = idMap.get(a.attachTo);
+        if (!target) continue;
+        const copy = makeNode(d, a.type, a.label, {
+          attachTo: target, side: a.side,
+          dir: a.type === 'role' ? undefined : a.dir,
+        });
+        d.nodes.push(copy);
+        idMap.set(a.id, copy.id);
+      }
+      for (const f of clip.flows) {
+        const from = idMap.get(f.from);
+        const to = idMap.get(f.to);
+        if (from && to) addFlow(d, from, to);
+      }
+      this.selection = new Set([...idMap.values()]);
+    });
+    this.notify();
+    this.requestRender();
+    this.toast(`Вставлено элементов: ${clip.mains.length + clip.attached.length}`);
+  }
 
   // ── Internals ──
 
@@ -202,9 +317,9 @@ export class Editor implements EditorContext {
 
   private onStoreChange(): void {
     this.layouted = layoutDiagram(this.store.diagram);
-    if (this.selection && !this.store.diagram.nodes.some(n => n.id === this.selection)) {
-      this.selection = null;
-    }
+    const alive = new Set(this.store.diagram.nodes.map(n => n.id));
+    const filtered = new Set([...this.selection].filter(id => alive.has(id)));
+    if (filtered.size !== this.selection.size) this.selection = filtered;
     this.notify();
     this.requestRender();
     this.scheduleAutosave();
@@ -246,6 +361,14 @@ export class Editor implements EditorContext {
     return this.layouted.views.find(v => v.node.id === id);
   }
 
+  private selectedMainNodes(): string[] {
+    const d = this.store.diagram;
+    return [...this.selection].filter(id => {
+      const n = nodeById(d, id);
+      return n !== undefined && isMainNode(n);
+    });
+  }
+
   private renderScene(): void {
     this.layouted = layoutDiagram(this.store.diagram);
     this.world.innerHTML = '';
@@ -269,14 +392,14 @@ export class Editor implements EditorContext {
       }));
     };
 
-    if (this.selection) {
-      const v = this.viewOf(this.selection);
+    for (const id of this.selection) {
+      const v = this.viewOf(id);
       if (v) drawOutline(v, SELECT_COLOR, false);
     }
 
-    // Ports for the hovered or selected main node.
-    const portNode = this.hoverNodeId ?? this.selection;
-    if (portNode) {
+    // Ports for the hovered or last selected main node.
+    const portNode = this.hoverNodeId ?? [...this.selection][this.selection.size - 1];
+    if (portNode && this.selection.size <= 1) {
       const v = this.viewOf(portNode);
       if (v && isMainNode(v.node)) {
         const cx = v.x + v.w / 2;
@@ -289,6 +412,16 @@ export class Editor implements EditorContext {
           'data-port': 'out', 'data-node-id': v.node.id, class: 'eepc-port',
         }));
       }
+    }
+
+    // Rubber band.
+    if (this.gesture.type === 'band') {
+      const g = this.gesture;
+      o.appendChild(svgEl('rect', {
+        x: Math.min(g.start.x, g.cur.x), y: Math.min(g.start.y, g.cur.y),
+        width: Math.abs(g.cur.x - g.start.x), height: Math.abs(g.cur.y - g.start.y),
+        class: 'eepc-band', 'pointer-events': 'none',
+      }));
     }
 
     // Connection feedback.
@@ -329,19 +462,70 @@ export class Editor implements EditorContext {
     return o;
   }
 
+  // ── Inline rename ──
+
+  private startInlineRename(id: string): void {
+    const v = this.viewOf(id);
+    if (!v) return;
+    if (v.node.type === 'gateway') return; // operator is edited in the inspector
+    this.closeRename(false);
+    const { scale, tx, ty } = this.viewport;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'eepc-inline-input';
+    input.value = v.node.label;
+    input.style.left = `${v.x * scale + tx}px`;
+    input.style.top = `${v.y * scale + ty}px`;
+    input.style.width = `${v.w * scale}px`;
+    input.style.height = `${v.h * scale}px`;
+    input.style.fontSize = `${Math.max(11, 13 * scale)}px`;
+    this.renameEl = input;
+    this.renameId = id;
+    this.canvasWrap.appendChild(input);
+    input.focus();
+    input.select();
+    const commit = () => this.closeRename(true);
+    input.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+      if (ev.key === 'Escape') { ev.preventDefault(); this.closeRename(false); }
+      ev.stopPropagation();
+    });
+    input.addEventListener('blur', commit);
+  }
+
+  private closeRename(apply: boolean): void {
+    const input = this.renameEl;
+    const id = this.renameId;
+    this.renameEl = null;
+    this.renameId = null;
+    if (!input || !id) return;
+    const value = input.value.trim();
+    input.remove();
+    if (apply) {
+      this.store.mutate(d => {
+        const n = nodeById(d, id);
+        if (n) n.label = value;
+      });
+    }
+    this.root.focus();
+  }
+
   // ── Pointer gestures ──
 
   private bindPointer(): void {
     const svg = this.svg;
 
+    svg.addEventListener('contextmenu', e => e.preventDefault());
+
     svg.addEventListener('pointerdown', (e: PointerEvent) => {
       this.root.focus();
-      svg.setPointerCapture(e.pointerId);
+      try { svg.setPointerCapture(e.pointerId); } catch { /* inactive pointer (synthetic events) */ }
       const target = e.target as Element;
       const world = this.toWorld(e);
       this.lastPointerWorld = world;
 
-      if (e.button === 1) {
+      // Right and middle buttons always pan the canvas.
+      if (e.button === 1 || e.button === 2) {
         this.gesture = { type: 'pan', startX: e.clientX, startY: e.clientY, tx0: this.viewport.tx, ty0: this.viewport.ty, moved: false };
         return;
       }
@@ -364,20 +548,16 @@ export class Editor implements EditorContext {
       const nodeEl = target.closest?.('[data-node-id]') as SVGElement | null;
       if (nodeEl) {
         const nodeId = nodeEl.getAttribute('data-node-id')!;
-        this.select(nodeId);
+        if (e.shiftKey) this.toggleSelect(nodeId);
+        else if (!this.selection.has(nodeId)) this.select(nodeId);
         const v = this.viewOf(nodeId);
         if (v && isMainNode(v.node)) {
-          this.gesture = {
-            type: 'maybe-drag', nodeId,
-            grabDx: world.x - v.x, grabDy: world.y - v.y,
-            startX: e.clientX, startY: e.clientY,
-          };
+          this.gesture = { type: 'maybe-drag', nodeId, startX: e.clientX, startY: e.clientY };
         }
         return;
       }
 
-      this.select(null);
-      this.gesture = { type: 'pan', startX: e.clientX, startY: e.clientY, tx0: this.viewport.tx, ty0: this.viewport.ty, moved: false };
+      this.gesture = { type: 'maybe-band', start: world, startX: e.clientX, startY: e.clientY, additive: e.shiftKey };
     });
 
     svg.addEventListener('pointermove', (e: PointerEvent) => {
@@ -391,17 +571,25 @@ export class Editor implements EditorContext {
       const g = this.gesture;
       if (g.type === 'maybe-drag' && Math.hypot(e.clientX - g.startX, e.clientY - g.startY) > 4) {
         this.store.beginBatch();
-        this.gesture = { type: 'drag', nodeId: g.nodeId, grabDx: g.grabDx, grabDy: g.grabDy };
+        const offsets = new Map<string, Point>();
+        for (const id of this.selectedMainNodes()) {
+          const v = this.viewOf(id);
+          if (v) offsets.set(id, { x: world.x - v.x, y: world.y - v.y });
+        }
+        if (offsets.size === 0) { const v = this.viewOf(g.nodeId); if (v) offsets.set(g.nodeId, { x: world.x - v.x, y: world.y - v.y }); }
+        this.gesture = { type: 'drag', offsets };
         this.requestRender();
         return;
       }
       if (g.type === 'drag') {
-        const node = this.store.diagram.nodes.find(n => n.id === g.nodeId);
-        if (node && isMainNode(node)) {
-          node.x = gridRound(world.x - g.grabDx);
-          node.y = gridRound(world.y - g.grabDy);
-          this.store.mutate(() => { /* positions already written */ }, { history: false });
+        for (const [id, off] of g.offsets) {
+          const node = this.store.diagram.nodes.find(n => n.id === id);
+          if (node && isMainNode(node)) {
+            node.x = gridRound(world.x - off.x);
+            node.y = gridRound(world.y - off.y);
+          }
         }
+        this.store.mutate(() => { /* positions already written */ }, { history: false });
         return;
       }
       if (g.type === 'connect') {
@@ -417,6 +605,15 @@ export class Editor implements EditorContext {
           this.viewport.ty = g.ty0 + dy;
           this.updateTransform();
         }
+        return;
+      }
+      if (g.type === 'maybe-band' && Math.hypot(e.clientX - g.startX, e.clientY - g.startY) > 4) {
+        this.gesture = { type: 'band', start: g.start, cur: world, additive: g.additive };
+        return;
+      }
+      if (g.type === 'band') {
+        g.cur = world;
+        this.requestRender();
         return;
       }
       if (hoverChanged) this.requestRender();
@@ -438,16 +635,34 @@ export class Editor implements EditorContext {
           this.toast(check.reason);
         }
       } else if (g.type === 'drag') {
-        const free = this.findFreePosition(g.nodeId);
-        const node = this.store.diagram.nodes.find(n => n.id === g.nodeId);
-        if (node && isMainNode(node) && free) {
-          node.x = free.x;
-          node.y = free.y;
+        // Drop: push overlapping nodes to free cells, one history batch already open.
+        for (const id of g.offsets.keys()) {
+          const free = this.findFreePosition(id);
+          const node = this.store.diagram.nodes.find(n => n.id === id);
+          if (node && isMainNode(node) && free) {
+            node.x = free.x;
+            node.y = free.y;
+          }
         }
         this.store.mutate(() => { /* positions already written */ }, { history: false });
-        this.select(g.nodeId);
       } else if (g.type === 'maybe-click-create') {
         this.handleCreateClick(world, targetId);
+      } else if (g.type === 'maybe-band') {
+        if (!g.additive) this.select(null);
+      } else if (g.type === 'band') {
+        const rect = {
+          x: Math.min(g.start.x, g.cur.x), y: Math.min(g.start.y, g.cur.y),
+          w: Math.abs(g.cur.x - g.start.x), h: Math.abs(g.cur.y - g.start.y),
+        };
+        const hits = this.layouted.views
+          .filter(v => isMainNode(v.node) &&
+            rectsOverlap(rect, { x: v.x, y: v.y, w: v.w, h: v.h }))
+          .map(v => v.node.id);
+        const next = g.additive ? new Set([...this.selection, ...hits]) : new Set(hits);
+        this.selection = next;
+        this.notify();
+        this.requestRender();
+        if (next.size > 0) this.toast(`Выбрано: ${next.size}`);
       }
       this.requestRender();
     });
@@ -462,8 +677,9 @@ export class Editor implements EditorContext {
     svg.addEventListener('dblclick', (e: MouseEvent) => {
       const nodeEl = (e.target as Element).closest?.('[data-node-id]') as SVGElement | null;
       if (nodeEl) {
-        this.select(nodeEl.getAttribute('data-node-id'));
-        this.focusLabelEditor();
+        const id = nodeEl.getAttribute('data-node-id')!;
+        this.select(id);
+        this.startInlineRename(id);
       }
     });
 
@@ -503,18 +719,18 @@ export class Editor implements EditorContext {
           side: type === 'document' ? 'left' : 'right',
           dir: type === 'role' ? undefined : 'in',
         });
-        addNodeSafe(d, n);
+        d.nodes.push(n);
         this.select(n.id);
-        this.focusLabelEditor();
+        this.startInlineRename(n.id);
       });
     } else {
       this.store.mutate(d => {
         const n = makeNode(d, type, defaultLabel(type), { operator, x: 0, y: 0 });
-        addNodeSafe(d, n);
+        d.nodes.push(n);
         const pos = this.findFreePosition(n.id, world);
         if (pos) { n.x = pos.x; n.y = pos.y; }
         this.select(n.id);
-        if (type !== 'gateway') this.focusLabelEditor();
+        if (type !== 'gateway') this.startInlineRename(n.id);
       });
     }
     this.setTool({ kind: 'select' });
@@ -553,14 +769,36 @@ export class Editor implements EditorContext {
     this.root.addEventListener('keydown', (e: KeyboardEvent) => {
       const inInput = (e.target as HTMLElement)?.matches?.('input, textarea, select');
       if (inInput) return;
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      const ctrl = e.ctrlKey || e.metaKey;
+
+      if (ctrl && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         if (e.shiftKey) this.store.redo(); else this.store.undo();
         return;
       }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+      if (ctrl && e.key.toLowerCase() === 'y') {
         e.preventDefault();
         this.store.redo();
+        return;
+      }
+      if (ctrl && e.key.toLowerCase() === 'd') {
+        e.preventDefault();
+        this.duplicateSelection();
+        return;
+      }
+      if (ctrl && e.key.toLowerCase() === 'c') {
+        e.preventDefault();
+        this.copySelection();
+        return;
+      }
+      if (ctrl && e.key.toLowerCase() === 'v') {
+        e.preventDefault();
+        this.pasteClipboard();
+        return;
+      }
+      if (ctrl && e.key.toLowerCase() === 'a') {
+        e.preventDefault();
+        this.setSelection(this.store.diagram.nodes.filter(isMainNode).map(n => n.id));
         return;
       }
       if (e.key === 'Escape') {
@@ -568,34 +806,33 @@ export class Editor implements EditorContext {
         else this.select(null);
         return;
       }
-      if ((e.key === 'Delete' || e.key === 'Backspace') && this.selection) {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && this.selection.size > 0) {
         e.preventDefault();
-        const id = this.selection;
-        this.store.mutate(d => removeNode(d, id));
+        const ids = [...this.selection];
+        this.store.mutate(d => {
+          for (const id of ids) removeNode(d, id);
+        });
         return;
       }
-      if (this.selection && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+      if (this.selection.size > 0 && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
         e.preventDefault();
         const step = e.shiftKey ? GRID * 3 : GRID;
-        const id = this.selection;
+        const ids = this.selectedMainNodes();
         this.store.mutate(d => {
-          const n = d.nodes.find(m => m.id === id);
-          if (n && isMainNode(n)) {
-            const x = n.x ?? 0, y = n.y ?? 0;
-            if (e.key === 'ArrowUp') n.y = y - step;
-            if (e.key === 'ArrowDown') n.y = y + step;
-            if (e.key === 'ArrowLeft') n.x = x - step;
-            if (e.key === 'ArrowRight') n.x = x + step;
+          for (const id of ids) {
+            const n = d.nodes.find(m => m.id === id);
+            if (n && isMainNode(n)) {
+              const x = n.x ?? 0, y = n.y ?? 0;
+              if (e.key === 'ArrowUp') n.y = y - step;
+              if (e.key === 'ArrowDown') n.y = y + step;
+              if (e.key === 'ArrowLeft') n.x = x - step;
+              if (e.key === 'ArrowRight') n.x = x + step;
+            }
           }
         });
       }
     });
   }
-}
-
-/** Mount the full editor into a container element. */
-export function mountEditor(container: HTMLElement, diagram: Diagram): Editor {
-  return new Editor(container, diagram);
 }
 
 function range(a: number, b: number): number[] {
@@ -615,6 +852,7 @@ function defaultLabel(type: NodeType): string {
   }
 }
 
-function addNodeSafe(d: Diagram, n: Diagram['nodes'][number]): void {
-  d.nodes.push(n);
+/** Mount the full editor into a container element. */
+export function mountEditor(container: HTMLElement, diagram: Diagram): Editor {
+  return new Editor(container, diagram);
 }

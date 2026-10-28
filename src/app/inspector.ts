@@ -1,5 +1,5 @@
 import {
-  countIssues, isAttachedNode, isMainNode, makeNode, nodeById, removeNode, validateDiagram,
+  countIssues, isAttachedNode, isMainNode, nodeById, removeNode, validateDiagram,
 } from '../core';
 import type { AttachDir, GatewayOperator, Side } from '../core';
 import type { EditorContext } from './editor';
@@ -10,8 +10,6 @@ const TYPE_TITLES: Record<string, string> = {
 };
 
 export function mountInspector(container: HTMLElement, ctx: EditorContext): () => void {
-  let lastLabelTick = ctx.labelFocusTick;
-
   const rebuild = (): void => {
     // Preserve label editing across rebuilds (focus + caret).
     const active = document.activeElement as HTMLElement | null;
@@ -23,7 +21,8 @@ export function mountInspector(container: HTMLElement, ctx: EditorContext): () =
 
     container.innerHTML = '';
     const d = ctx.store.diagram;
-    const sel = ctx.selection ? nodeById(d, ctx.selection) : undefined;
+    const ids = [...ctx.selection];
+    const sel = ids.length === 1 ? nodeById(d, ids[0]) : undefined;
 
     const props = document.createElement('div');
     props.className = 'eepc-panel';
@@ -32,12 +31,55 @@ export function mountInspector(container: HTMLElement, ctx: EditorContext): () =
     propsTitle.textContent = 'Свойства';
     props.appendChild(propsTitle);
 
-    if (!sel) {
+    if (ids.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'eepc-muted';
-      empty.textContent = 'Выберите элемент на схеме. Двойной клик — редактировать подпись.';
+      empty.textContent = 'Выберите элемент на схеме (или рамкой по пустому месту). Двойной клик — переименовать.';
       props.appendChild(empty);
-    } else {
+    } else if (ids.length > 1) {
+      const counts = new Map<string, number>();
+      for (const id of ids) {
+        const n = nodeById(d, id);
+        if (!n) continue;
+        counts.set(n.type, (counts.get(n.type) ?? 0) + 1);
+      }
+      const summary = [...counts.entries()]
+        .map(([t, c]) => `${TYPE_TITLES[t] ?? t}: ${c}`)
+        .join(' · ');
+      const cap = document.createElement('div');
+      cap.className = 'eepc-type-caption';
+      cap.textContent = `Выбрано элементов: ${ids.length}`;
+      props.appendChild(cap);
+      const detail = document.createElement('div');
+      detail.className = 'eepc-muted';
+      detail.textContent = summary;
+      props.appendChild(detail);
+      const actions = document.createElement('div');
+      actions.className = 'eepc-actions';
+      const dup = document.createElement('button');
+      dup.type = 'button';
+      dup.className = 'eepc-btn';
+      dup.textContent = 'Дублировать (Ctrl+D)';
+      dup.addEventListener('click', () => ctx.duplicateSelection());
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'eepc-btn eepc-btn-danger';
+      del.textContent = 'Удалить (Del)';
+      del.addEventListener('click', () => {
+        const list = [...ctx.selection];
+        ctx.store.mutate(dd => {
+          for (const id of list) removeNode(dd, id);
+        });
+        ctx.select(null);
+      });
+      actions.append(dup, del);
+      props.appendChild(actions);
+      const hint = document.createElement('div');
+      hint.className = 'eepc-muted';
+      hint.style.marginTop = '8px';
+      hint.textContent = 'Перетащите любой выбранный элемент — группа поедет вместе. Ctrl+C / Ctrl+V, стрелки — сдвиг группы.';
+      props.appendChild(hint);
+    } else if (sel) {
       const typeRow = document.createElement('div');
       typeRow.className = 'eepc-type-caption';
       typeRow.textContent = TYPE_TITLES[sel.type] +
@@ -124,17 +166,7 @@ export function mountInspector(container: HTMLElement, ctx: EditorContext): () =
         dup.type = 'button';
         dup.className = 'eepc-btn';
         dup.textContent = 'Дублировать';
-        dup.addEventListener('click', () => {
-          const src = sel;
-          ctx.store.mutate(dd => {
-            const copy = makeNode(dd, src.type, src.label, {
-              operator: src.type === 'gateway' ? src.operator : undefined,
-              x: (src.x ?? 0) + 40,
-              y: (src.y ?? 0) + 40,
-            });
-            dd.nodes.push(copy);
-          });
-        });
+        dup.addEventListener('click', () => ctx.duplicateSelection());
         actions.appendChild(dup);
       }
       const del = document.createElement('button');
@@ -206,12 +238,6 @@ export function mountInspector(container: HTMLElement, ctx: EditorContext): () =
         ta.focus();
         if (caret) ta.setSelectionRange(caret.start, caret.end);
       }
-    }
-    // Focus on explicit request (double click).
-    if (ctx.labelFocusTick !== lastLabelTick) {
-      lastLabelTick = ctx.labelFocusTick;
-      const ta = container.querySelector<HTMLTextAreaElement>('[data-field="label"]');
-      if (ta) { ta.focus(); ta.select(); }
     }
   };
 
